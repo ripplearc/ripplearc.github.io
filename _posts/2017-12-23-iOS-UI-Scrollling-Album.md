@@ -86,7 +86,7 @@ Open `HDFlowLayout.swift`. This class inherits from `UICollectionViewFlowLayout`
 
 Before filling out the blank, let's use landscape photos as an example to illustrate how the parallax effect is implemented. 
 
-<img src="/images/iOS/UI/ScrollingAlbum/hd_parallax.png" width="900" height="450" />
+<img src="/images/iOS/UI/ScrollingAlbum/hd_parallax.png" width="720" height="347" />
 
 1. `cellMaximumWidth`: The maximum width of a cell, and it is usually the width of UICollectionView
 2. `cellFullSpacing`: The spacing between the current and the next cell, when both of them are landscape. 
@@ -364,5 +364,241 @@ That should completes the accordion animation. :tada:
 git co -b thumbnail_flowlayout_accordion
 ```
 
+# 4. Synchronization Between HD and Thumbnail CollectionView
+The last mission is to reflect the movement from one UICollectionView to the other, which is enabled by `FlowLayoutSyncManager`. The reflection from thumbnail to hd is relatively easy since no additional animation is needed for the `hdCollectionView`. On the other hand, `thumbnailCollectionView` needs to switch to another layout called `ThumbnailSlaveFlowLayout` to catch up with the movement of `hdCollectionView`. Implementing `ThumbnailSlaveFlowLayout` is the main focus of this section.
 
+:octocat: Switch to the `bootcamp_hd_thumbnail_sync` branch
+```git
+git co -b bootcamp_hd_thumbnail_sync
+```
+## 4.1 FlowLayoutSyncManager
+
+Let's first get familiar with `FlowLayoutSyncManager.swift`. The `FlowLayoutSync` protocol contains a few methods that allow two UICollectionView to talk to each other. 
+
+`masterCollectionView` property determines which UICollectionView does the user interacts with at the moment. It is set from the `AlbumViewController` which implements the `UICollectionViewDelegate` protocol.
+
+:pencil2: `FlowLayoutSyncManager.swift` :straight_ruler: `line 32`
+```swift
+var masterCollectionView: UICollectionView? {
+    didSet {
+        guard !isSlaveNotChanged else { return }
+        if (isHdMaster) {
+            switchThumbnailToSlave()
+        } else {
+            switchThumbnailToMaster()
+        }
+    }
+}
+```
+When the use begins dragging the cell in the `hdCollectionView`, the `thumbnailCollectionView` folds the current cell. When the `hdCollectionView` starts to decelerate, the `thumbnailCollectionView` unfolds the current cell.
+
+:pencil2: `AlbumViewController.swift` :straight_ruler: `line 145`
+```swift
+//MARK：- CollectionView Delegate
+extension AlbumViewController: UICollectionViewDelegate {
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        if let collectionView = scrollView as? UICollectionView {
+            flowLayoutSyncManager.masterCollectionView = collectionView
+            if let layout = collectionView.collectionViewLayout as? ThumbnailFlowLayoutDraggingBehavior {
+                layout.foldCurrentCell()
+            }
+        }
+    }
+    
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        if let collectionView = scrollView as? UICollectionView,
+            let layout = collectionView.collectionViewLayout as? ThumbnailFlowLayoutDraggingBehavior{
+            layout.unfoldCurrentCell()
+        }
+    }
+    
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate,
+            let collectionView = scrollView as? UICollectionView,
+            let layout = collectionView.collectionViewLayout as? ThumbnailFlowLayoutDraggingBehavior{
+            layout.unfoldCurrentCell()
+        }
+    }
+}
+```
+
+Both parties are responsible for altering the `contentOffset` of the other one. In addition, the reflection from the `thumbnailCollectionView` to `hdCollectionView` is a simply change of the indexPath of `hdCollectionView`'s current cell. On the contrary, `hdCollectionView` also needs to notify `thumbnailCollectionView` about the progress been made: `fractionComplete`, the transition from the current cell to the next one. 
+
+:pencil2: `FlowLayoutSyncManager.swift` :straight_ruler: `line 22`
+```swift
+func didMove(_ collectionView: UICollectionView, to indexPath: IndexPath, with fractionComplete: CGFloat) {
+    if isHdMaster,
+        let slave = slaveCollectionView {
+        setThumbnailContentOffset(slave, indexPath, fractionComplete)
+    } else if !isHdMaster,
+        let slave = slaveCollectionView {
+        setHDContentOffset(slave, indexPath)
+    }
+}
+```
+:pencil2: `FlowLayoutSyncManager.swift` :straight_ruler: `line 70`
+```swift
+fileprivate func setHDContentOffset(_ slave: UICollectionView, _ indexPath: IndexPath) {
+    if let slaveMeasurement = slave.collectionViewLayout as? CellBasicMeasurement {
+        let slaveContentOffset = slaveMeasurement.cellMaximumWidth * (CGFloat(indexPath.item))
+        slave.setContentOffset((CGPoint(x: slaveContentOffset - slave.contentInset.left, y:0)), animated: false)
+    }
+}
+```
+:pencil2: `FlowLayoutSyncManager.swift` :straight_ruler: `line 70`
+```swift
+fileprivate func setThumbnailContentOffset(_ slave: CellConfiguratedCollectionView, _ indexPath: IndexPath, _ fractionComplete: CGFloat) {
+    var slaveContentOffset:CGFloat = 0
+    
+    if let cellSize = slave.cellSize(for: indexPath),
+        var slaveLayout = slave.collectionViewLayout as? CellPassiveMeasurement {
+        if fractionComplete < 0 {
+            slaveContentOffset = cellSize.width * fractionComplete
+        } else {
+            slaveContentOffset = slaveLayout.unitStepOfPuppet * (CGFloat(indexPath.item) + fractionComplete)
+            slaveLayout.puppetCellIndex = indexPath.item
+            slaveLayout.puppetFractionComplete = fractionComplete
+        }
+        slave.setContentOffset(CGPoint(x: slaveContentOffset - slave.contentInset.left, y: 0), animated: false)
+    }
+}
+```
+The timing to notify the other side is at `layoutAttributesForElements` 
+
+:pencil2: `FlowLayoutSyncManager.swift` :straight_ruler: `line 87`
+```swift
+override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+    flowLayoutSyncManager.didMove(collectionView!, to: IndexPath(item:currentCellIndex, section:0), with: currentFractionComplete)
+    ...
+}
+```
+
+:pencil2: `FlowLayoutSyncManager.swift` :straight_ruler: `line 114`
+```swift
+override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+    flowLayoutSyncManager.didMove(collectionView!, to: IndexPath(item:currentCellIndex, section:0),  with: 0)
+    ...
+}
+```
+## 4.2 ThumbnailSlaveFlowLayout
+Time to fill the void of `ThumbnailSlaveFlowLayout.swift`.
+
+<img src="/images/iOS/UI/ScrollingAlbum/hd_thumbnail_sync.png" width="899" height="607" />
+
+Like always, let's start with some of key computed properties.
+1. `puppetCellIndex`: The index that correspondes to the `currentCellIndex` of `hdFlowLayout`, and is set through `FlowLayoutSyncManager` as mentioned above 
+2. `puppetFractionComplete`: Corresponding to the `currentFractionComplete` of `hdFlowLayout`, and is set through `FlowLayoutSyncManager` as mentioned above 
+3. `focusedCellCenter/Size`: The center and size of the cell of `puppetCellIndex`
+4. `nextFocusedCellCenter/Size`: The center and size of the cell to the right hand side of `focusedCell`
+5. `leftSpacingOfFocusedCell`: The spacing to the left hand side of the `focusedCell`
+6. `rightSpacingOfNextFocusedCell`: The spacing to the right hand side of the `nextFocusedCell`
+7. `centerAfterNextFocusedCell`: The center and size of the cells to the right hand side of the `nextFocusedCell`
+
+Determined by the `puppetFractionComplete`, `leftSpacingOfFocusedCell` changes from `cellFullSpacing` to `cellNormalSpacing` linearly.  
+
+:pencil2: `ThumbnailSlaveFlowLayout.swift`
+```swift
+fileprivate var leftSpacingOfFocusedCell: CGFloat {
+     return (cellFullSpacing - cellNormalSpacing) * (1 - puppetFractionComplete) + cellNormalSpacing
+}
+```
+The sum of `leftSpacingOfFocusedCell` and `rightSpacingOfNextFocusedCell` is a constant during the animation.  
+
+:pencil2: `ThumbnailSlaveFlowLayout.swift`
+```swift
+fileprivate var rightSpacingOfNextFocusedCell: CGFloat {
+    return cellFullSpacing + cellNormalSpacing - leftSpacingOfFocusedCell
+}
+```
+`focusedCellSize` also changes from `cellFullWidth` to `cellNormalWidth` linearly with `puppetFractionComplete` as the parameter. Its center shifts accordingly.
+
+:pencil2: `ThumbnailSlaveFlowLayout.swift`
+```swift
+fileprivate var focusedCellSize: CGSize {
+    if puppetFractionComplete < 0 {
+        return CGSize(width: cellFullWidth(for:currentIndexPath), height: cellHeight)
+    } else {
+        return CGSize(width: (cellFullWidth(for:currentIndexPath) - cellNormalWidth) * (1 - puppetFractionComplete) + cellNormalWidth, height:cellHeight)
+    }
+}
+
+fileprivate var focusedCellCenter: CGPoint {
+    if puppetFractionComplete < 0 {
+        return CGPoint(x: cellFullSpacing + cellFullWidth(for:currentIndexPath) / 2, y: cellHeight / 2)
+    } else {
+        return CGPoint(x: CGFloat(puppetCellIndex) * cellNormalWidthAndSpacing
+            + leftSpacingOfFocusedCell
+            + focusedCellSize.width / 2, y: cellHeight / 2)
+    }
+}
+```
+As `focusedCellSize` shrinks linearly, `nextFocusedCellSize` grows linearly. And vice versa. The centers of the `nextFocusedCell` and the those to the right hand side are adjusted accodindly to the `nextFocusedCellSize`'s change.
+
+:pencil2: `ThumbnailSlaveFlowLayout.swift`
+```swift
+fileprivate var nextFocusedCellSize: CGSize {
+    return CGSize(width: (cellFullWidth(for:next(to: currentIndexPath)) - cellNormalWidth) * puppetFractionComplete + cellNormalWidth, height: cellHeight)
+}
+
+fileprivate var nextFocusedCellCenter: CGPoint {
+    return CGPoint(x: focusedCellCenter.x
+        + focusedCellSize.width / 2
+        + nextFocusedCellSize.width / 2
+        + cellFullSpacing, y: cellHeight / 2)
+}
+
+fileprivate func centerAfterNextFocusedCell(for indexPath: IndexPath) -> CGPoint {
+    guard (indexPath.item > next(to: currentIndexPath).item) else { return CGPoint.zero }
+    return CGPoint(x: nextFocusedCellCenter.x
+        + nextFocusedCellSize.width / 2
+        + rightSpacingOfNextFocusedCell
+        + cellNormalWidthAndSpacing * CGFloat(indexPath.item - puppetCellIndex - 2)
+        + cellNormalWidth / 2,
+                   y: nextFocusedCellCenter.y)
+}
+```
+The last piece of puzzle is assigning the size and center property of the `attributes` based on the `indexPath` of the cell.
+
+:pencil2: `ThumbnailSlaveFlowLayout.swift`
+```swift
+override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+        guard let attributes = super.layoutAttributesForItem(at: indexPath) else {
+            return nil
+        }
+        
+        if indexPath.item < puppetCellIndex {
+            attributes.size = cellNormalSize
+            attributes.center = estimatedCenterPoints[indexPath.item]
+        } else if indexPath.item > puppetCellIndex + 1 {
+            attributes.size = cellNormalSize
+            attributes.center = centerAfterNextFocusedCell(for: indexPath)
+        } else if indexPath.item == puppetCellIndex {
+            attributes.size = focusedCellSize
+            attributes.center = focusedCellCenter
+        } else if indexPath.item == puppetCellIndex + 1 {
+            attributes.size = nextFocusedCellSize
+            attributes.center = nextFocusedCellCenter
+        }
+        
+        return attributes
+    }
+```
+Run the program, and wait for the momment of truth. :tada:
+
+:octocat: If you have any difficulty in implementing the synchronization. Switch to the `hd_thumbnail_sync` branch.
+```git
+git co -b hd_thumbnail_sync
+```
+# 5 Summary
+In this lab, we have built an album similiar to the native `Photos` app on the iOS system, which features **parallax** and **accordion** animation when user browses photos. We built three customized `UICollectionViewFlowLayout` and overrides their a few key methods including `prepare`, `collectionViewContentSize`, `layoutAttributesForItem` and `layoutAttributesForElements`. 
+
+:octocat: The complete implementation can be found at the master branch
+```git
+git co -b master 
+```
+## What we've learned
+:white_check_mark: Set customized `UICollectionViewFlowLayout` to `UICollectionView`   
+:white_check_mark: Override some of the key methods of `UICollectionViewFlowLayout` to change the size and center of the cells dynamically   
+:white_check_mark: How to implement **parallax** and **accordion** animation effect by manipulating the size and center of the cells    
+:white_check_mark: How to sychronize the movement on one `UICollectionViewFlowLayout` to the other 
 
