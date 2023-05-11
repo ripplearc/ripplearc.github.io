@@ -9,6 +9,7 @@ In this lab, we will build a **TechCrunch** table view to show the catalog of it
 
 <img src="/images/iOS/UI/AutoSizeUITableViewCell/techcrunch_table_view.png" alt="Drawing" style="width: 300px;"/>
 
+
 ## What you will learn
 :checkered_flag: Automatically sizing the arragedSubviews based on their intrinsicContentSize  
 :checkered_flag: Automatically computing the height of UITableViewCell based on its content  
